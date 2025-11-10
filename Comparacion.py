@@ -5,6 +5,7 @@ import pandas as pd
 from difflib import get_close_matches
 import streamlit as st
 
+# Leer datos desde archivo TXT
 def leer_datos(path="precios.txt"):
     base = os.path.dirname(__file__)
     path = os.path.join(base, path)
@@ -40,6 +41,7 @@ def leer_datos(path="precios.txt"):
     df = df.dropna(subset=["precio"]).reset_index(drop=True)
     return df
 
+# Normaliza texto quitando puntuación y tokens de cantidad para agrupar productos
 def _normalize_text_for_clustering(s: str) -> str:
     s = (s or "").lower()
     s = re.sub(r"[^a-z0-9\s]", " ", s)
@@ -47,6 +49,7 @@ def _normalize_text_for_clustering(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+# Convierte cantidad y tipo a una unidad base (kg, L, etc) para comparar.
 def _convert_to_base(value: float, typ: str):
     typ = typ.lower()
     if typ in ("kg",):
@@ -65,6 +68,7 @@ def _convert_to_base(value: float, typ: str):
         return (value, "count")
     return (None, None)
 
+# Extrae cantidad y tipo desde la columna 'unidad' o desde el nombre del producto.
 def _parse_qty_and_type(unidad: str, producto: str):
     txt = (unidad or "").lower().strip()
     patterns = [
@@ -84,6 +88,7 @@ def _parse_qty_and_type(unidad: str, producto: str):
         if m:
             val = float(m.group(1))
             return _convert_to_base(val, typ)
+    # Intentar extraer cantidad desde el nombre del producto si no está en 'unidad'
     m = re.search(r"(\d+(?:\.\d+)?)\s*(kg|g|lb|lbs|l|ml|oz|ozs|un|unidad|unidades|gr|grs)", producto.lower())
     if m:
         val = float(m.group(1))
@@ -91,15 +96,18 @@ def _parse_qty_and_type(unidad: str, producto: str):
         return _convert_to_base(val, typ)
     return (None, None)
 
+# Añade columnas utiles: producto_norm, qty_base, unit_type y unit_price.
 def enriquecer_ofertas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["producto_norm"] = df["producto"].astype(str).apply(_normalize_text_for_clustering)
     qtys = df.apply(lambda r: _parse_qty_and_type(r.get("unidad", ""), r.get("producto", "")), axis=1)
     df["qty_base"] = [q[0] for q in qtys]
     df["unit_type"] = [q[1] for q in qtys]
+    # Default: 'each' si no se detectó tipo
     df["unit_type"] = df["unit_type"].fillna("each")
-    # si no qty_base y unit_type == each, asumimos qty_base=1
+    # Si no hay qty_base y tipo 'each', asumir 1 unidad
     df["qty_base"] = df.apply(lambda r: r["qty_base"] if pd.notna(r["qty_base"]) else (1.0 if r["unit_type"] == "each" else None), axis=1)
+    # unit_price = precio / qty_base cuando sea posible
     def calc_up(row):
         try:
             if pd.notna(row["qty_base"]) and row["qty_base"] > 0:
@@ -110,6 +118,7 @@ def enriquecer_ofertas(df: pd.DataFrame) -> pd.DataFrame:
     df["unit_price"] = df.apply(calc_up, axis=1)
     return df
 
+# Busca la mejor oferta para cada producto de la lista; devuelve candidatas y la seleccion
 def comparar_precios(datos: pd.DataFrame, lista_productos, cutoff=0.75, n_matches=3) -> pd.DataFrame:
     resultados = []
     if datos.empty:
@@ -121,17 +130,21 @@ def comparar_precios(datos: pd.DataFrame, lista_productos, cutoff=0.75, n_matche
         if not q:
             continue
         q_norm = _normalize_text_for_clustering(q)
+        # búsqueda por substring en producto_norm
         mask = df["producto_norm"].str.contains(re.escape(q_norm), na=False)
         candidatas = df[mask].copy()
+        # si no hay candidatas, buscar por overlap de tokens
         if candidatas.empty and q_norm:
             q_tokens = set(q_norm.split())
             df["overlap"] = df["producto_norm"].apply(lambda s: len(q_tokens & set((s or "").split())))
             candidatas = df[df["overlap"]>0].copy().sort_values("overlap", ascending=False)
             df = df.drop(columns=["overlap"], errors="ignore")
+        # fallback fuzzy sobre nombres crudos
         if candidatas.empty:
             similares = get_close_matches(q.lower(), nombres_raw, n=n_matches, cutoff=cutoff)
             if similares:
                 candidatas = df[df["producto"].str.lower().isin(similares)].copy()
+        # ordenar por unit_price si existe, si no por precio absoluto
         if not candidatas.empty:
             candidatas["sort_key"] = candidatas["unit_price"].fillna(candidatas["precio"])
             candidatas = candidatas.sort_values("sort_key").reset_index(drop=True)
@@ -156,7 +169,8 @@ def comparar_precios(datos: pd.DataFrame, lista_productos, cutoff=0.75, n_matche
                 "candidatas": []
             })
     return pd.DataFrame(resultados)
-
+    
+# Calcula el costo de comprar toda la lista en cada tienda (elige mejor oferta por articulo en la tienda)
 def best_single_store(datos: pd.DataFrame, lista_productos) -> pd.DataFrame:
     """
     Calcula el costo total si se comprara toda la lista en cada tienda.
@@ -212,6 +226,7 @@ def best_single_store(datos: pd.DataFrame, lista_productos) -> pd.DataFrame:
         })
     return pd.DataFrame(results)
 
+# Interfaz Streamlit
 def main():
     st.title("ComparaPR: Prototipo de agente comparador de precios")
     st.write("Ingresa los productos que desea revisar (separe con comas):")
@@ -256,7 +271,7 @@ def main():
                     "total_str": f"${r['total']:.2f}" if r["feasible"] and r["total"] is not None else "N/A"
                 })
             st.table(pd.DataFrame(display))
-            # Mostrar tienda con menor total factible
+            # Mostrar tienda con menor total 
             feasibles = store_totals[store_totals["feasible"] == True].copy()
             if not feasibles.empty:
                 best = feasibles.loc[feasibles["total"].idxmin()]
